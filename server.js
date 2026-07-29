@@ -766,12 +766,7 @@ async function buildBrief(userId) {
 }
 
 function briefHtml(d) {
-  const money = (n) => 'process.env.PORT || 3001, () => {
-  console.log('\n✓ SweepFi server running on http://192.168.1.155:3001');
-  console.log('✓ Plaid environment: sandbox');
-  console.log('✓ Waiting for requests...\n');
-});
- + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = (n) => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const planRows = (d.plan || []).map(p =>
     '<tr><td style="padding:8px 0;color:#EDEDED;font-size:15px;">' + p.name +
     '<div style="color:#8A8A93;font-size:12px;">' + p.sub + '</div></td>' +
@@ -800,12 +795,7 @@ async function sendBrief(reason) {
     return { skipped: true };
   }
   const data = await buildBrief(NOTIFY_USER_ID);
-  const money = (n) => 'process.env.PORT || 3001, () => {
-  console.log('\n✓ SweepFi server running on http://192.168.1.155:3001');
-  console.log('✓ Plaid environment: sandbox');
-  console.log('✓ Waiting for requests...\n');
-});
- + Number(n || 0).toFixed(2);
+  const money = (n) => '$' + Number(n || 0).toFixed(2);
   // Phone push via ntfy
   let pushStatus = null;
   if (NTFY_TOPIC) {
