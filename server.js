@@ -804,7 +804,7 @@ async function sendBrief(reason) {
       const p = await fetch('https://ntfy.sh/' + NTFY_TOPIC, {
         method: 'POST',
         headers: {
-          'Title': 'Good morning — ' + money(data.safe) + ' safe to invest',
+          'Title': 'Good morning: ' + money(data.safe) + ' safe to invest',
           'Priority': 'default',
           'Tags': 'moneybag',
         },
