@@ -812,7 +812,7 @@ async function sendBrief(reason) {
       });
       pushStatus = p.status;
       console.log('[brief] ntfy push:', p.status);
-    } catch (e) { console.log('[brief] ntfy error:', e.message); }
+    } catch (e) { console.log('[brief] ntfy error:', e.message, '| cause:', e.cause ? (e.cause.code || e.cause.message || String(e.cause)) : 'none'); }
   }
 
   if (!RESEND_KEY || !NOTIFY_EMAIL) {
