@@ -845,6 +845,7 @@ setInterval(() => {
     const today = et.year + '-' + et.month + '-' + et.day;
     if (et.hour === '08' && lastBriefDate !== today) {
       lastBriefDate = today;
+      if (NOTIFY_USER_ID) snapshotNetWorth(NOTIFY_USER_ID).catch(e => console.log('[snapshot] error:', e.message));
       sendBrief('scheduled').catch(e => console.log('[brief] error:', e.message));
     }
   } catch (e) { console.log('[brief] scheduler error:', e.message); }
@@ -1058,6 +1059,63 @@ app.post('/method/payments', async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
+});
+
+
+// ── NET-WORTH-HISTORY ─────────────────────────────────────────────────────
+async function snapshotNetWorth(userId) {
+  const { data: tokens } = await supabase
+    .from('plaid_tokens')
+    .select('access_token')
+    .eq('user_id', userId);
+  if (!tokens || !tokens.length) throw new Error('No linked accounts');
+
+  let assets = 0, debt = 0;
+  for (const t of tokens) {
+    try {
+      const r = await plaid.accountsGet({ access_token: t.access_token });
+      for (const a of r.data.accounts) {
+        const bal = a.balances.current ?? a.balances.available ?? 0;
+        if (a.type === 'credit') debt += bal;
+        else assets += bal;
+      }
+    } catch (e) { console.log('[snapshot] token skip:', e.response?.data?.error_code || e.message); }
+  }
+  const row = {
+    user_id: userId,
+    date: new Date().toISOString().split('T')[0],
+    net_worth: Math.round((assets - debt) * 100) / 100,
+    assets: Math.round(assets * 100) / 100,
+    debt: Math.round(debt * 100) / 100,
+  };
+  const { error } = await supabase.from('net_worth_history').upsert(row, { onConflict: 'user_id,date' });
+  if (error) throw new Error(error.message);
+  console.log('[snapshot]', row.date, 'net:', row.net_worth);
+  return row;
+}
+
+// Manual trigger (browser-friendly)
+app.get('/snapshot', async (req, res) => {
+  try {
+    const row = await snapshotNetWorth(req.query.user_id);
+    res.json(row);
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// History for charts
+app.post('/history', async (req, res) => {
+  try {
+    const days = Math.min(365, Number(req.body.days) || 90);
+    const since = new Date(Date.now() - days * 864e5).toISOString().split('T')[0];
+    const { data, error } = await supabase
+      .from('net_worth_history')
+      .select('date, net_worth, assets, debt')
+      .eq('user_id', req.body.user_id)
+      .gte('date', since)
+      .order('date', { ascending: true });
+    if (error) throw new Error(error.message);
+    res.json({ points: data || [] });
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.listen(process.env.PORT || 3001, () => {
