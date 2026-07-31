@@ -750,8 +750,10 @@ app.post('/expenses', async (req, res) => {
       }
     } catch (e) { console.log('[expenses] overrides skip:', e.message); }
 
-    const today = new Date();
+    const today = new Date(); // MONTH-SUMMARY
+    const monthStartStr = today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-01';
     bills.forEach(b => {
+      b.paid_this_month = !!(b.last_date && b.last_date >= monthStartStr);
       if (!b.due_day) { b.next_due = null; return; }
       let y = today.getFullYear(), m = today.getMonth();
       if (today.getDate() > b.due_day) { m += 1; if (m > 11) { m = 0; y += 1; } }
