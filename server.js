@@ -670,7 +670,7 @@ app.post('/expenses', async (req, res) => {
     if (!tokens || !tokens.length) return res.status(400).json({ error: 'No linked accounts' });
 
     const endDate = new Date().toISOString().split('T')[0];
-    const startDate = new Date(Date.now() - 30 * 864e5).toISOString().split('T')[0];
+    const startDate = new Date(Date.now() - 60 * 864e5).toISOString().split('T')[0]; // SIXTY-DAY-BILLS
     let transactions = [], accounts = [];
     for (const t of tokens) {
       try {
@@ -681,7 +681,7 @@ app.post('/expenses', async (req, res) => {
         const tr = await plaid.transactionsGet({
           access_token: t.access_token,
           start_date: startDate, end_date: endDate,
-          options: { count: 250 },
+          options: { count: 500 },
         });
         transactions = transactions.concat(tr.data.transactions);
       } catch (e) { console.log('[expenses] txn fail:', e.response?.data?.error_code || e.message); }
@@ -692,6 +692,8 @@ app.post('/expenses', async (req, res) => {
       .reduce((s, a) => s + (a.balances.available ?? a.balances.current ?? 0), 0);
 
     const outflows = transactions.filter(tx => tx.amount > 0);
+    const cutoff30 = new Date(Date.now() - 30 * 864e5).toISOString().split('T')[0];
+    const outflows30 = outflows.filter(tx => tx.date >= cutoff30);
 
     // Recurring bills
     const byName = {};
@@ -705,19 +707,51 @@ app.post('/expenses', async (req, res) => {
       const amounts = txs.map(t => t.amount);
       const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
       if (amounts.every(a => Math.abs(a - avg) / avg < 0.25) && avg >= 5) {
+        const days = txs.map(t => Number(t.date.split('-')[2])).sort((a, b) => a - b);
+        const dueDay = days[Math.floor(days.length / 2)];
         bills.push({
           name,
           monthly: Math.round(avg * 100) / 100,
           last_date: txs.map(t => t.date).sort().pop(),
-          ready_to_pay: cash - 200 >= avg, // cash covers it beyond min buffer
+          due_day: dueDay,
+          ready_to_pay: cash - 200 >= avg,
         });
       }
     });
-    bills.sort((a, b) => b.monthly - a.monthly);
+    // BILL-OVERRIDES: user-set amount/due day win over detection
+    try {
+      const { data: ov } = await supabase
+        .from('bill_overrides')
+        .select('name, amount, due_day')
+        .eq('user_id', req.body.user_id);
+      if (ov && ov.length) {
+        const byOv = Object.fromEntries(ov.map(o => [o.name, o]));
+        bills.forEach(b => {
+          const o = byOv[b.name];
+          if (o) {
+            if (o.amount != null) { b.monthly = Number(o.amount); b.overridden = true; }
+            if (o.due_day != null) { b.due_day = Number(o.due_day); b.overridden = true; }
+            b.ready_to_pay = cash - 200 >= b.monthly;
+          }
+        });
+      }
+    } catch (e) { console.log('[expenses] overrides skip:', e.message); }
+
+    const today = new Date();
+    bills.forEach(b => {
+      if (!b.due_day) { b.next_due = null; return; }
+      let y = today.getFullYear(), m = today.getMonth();
+      if (today.getDate() > b.due_day) { m += 1; if (m > 11) { m = 0; y += 1; } }
+      const lastDay = new Date(y, m + 1, 0).getDate();
+      const d = new Date(y, m, Math.min(b.due_day, lastDay));
+      b.next_due = d.toISOString().split('T')[0];
+      b.days_until = Math.round((d - today) / 864e5);
+    });
+    bills.sort((a, b) => (a.days_until ?? 99) - (b.days_until ?? 99));
 
     // Category totals
     const catTotals = {};
-    outflows.forEach(tx => {
+    outflows30.forEach(tx => {
       const cat = (tx.personal_finance_category?.primary || tx.category?.[0] || 'Other')
         .replace(/_/g, ' ').toLowerCase();
       catTotals[cat] = (catTotals[cat] || 0) + tx.amount;
@@ -726,7 +760,7 @@ app.post('/expenses', async (req, res) => {
       .map(([name, total]) => ({ name, total: Math.round(total * 100) / 100 }))
       .sort((a, b) => b.total - a.total);
 
-    const totalMonthly = Math.round(outflows.reduce((s, t) => s + t.amount, 0) * 100) / 100;
+    const totalMonthly = Math.round(outflows30.reduce((s, t) => s + t.amount, 0) * 100) / 100;
     const totalBills = Math.round(bills.reduce((s, b) => s + b.monthly, 0) * 100) / 100;
 
     // Debts ready to pay
@@ -743,11 +777,15 @@ app.post('/expenses', async (req, res) => {
     const recurringSet = new Set(bills.map(b => b.name));
     const top_merchants = Object.entries(byName)
       .filter(([name]) => !recurringSet.has(name))
-      .map(([name, txs]) => ({
-        name,
-        total: Math.round(txs.reduce((s, t) => s + t.amount, 0) * 100) / 100,
-        count: txs.length,
-      }))
+      .map(([name, txs]) => {
+        const t30 = txs.filter(t => t.date >= cutoff30);
+        return {
+          name,
+          total: Math.round(t30.reduce((s, t) => s + t.amount, 0) * 100) / 100,
+          count: t30.length,
+        };
+      })
+      .filter(m => m.total > 0)
       .sort((a, b) => b.total - a.total)
       .slice(0, 10);
 
@@ -1257,6 +1295,25 @@ app.post('/guardrails/remove', async (req, res) => {
       .eq('user_id', req.body.user_id)
       .eq('target', (req.body.target || '').toLowerCase());
     if (error) throw new Error(error.message);
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+
+// ── BILL-OVERRIDES endpoint ──────────────────────────────────────────────
+app.post('/bills/override', async (req, res) => {
+  try {
+    if (!req.body.user_id || !req.body.name) return res.status(400).json({ error: 'user_id and name required' });
+    const row = {
+      user_id: req.body.user_id,
+      name: req.body.name.toLowerCase(),
+      amount: req.body.amount != null ? Number(req.body.amount) : null,
+      due_day: req.body.due_day != null ? Math.min(31, Math.max(1, Number(req.body.due_day))) : null,
+      created_at: new Date().toISOString(),
+    };
+    const { error } = await supabase.from('bill_overrides').upsert(row, { onConflict: 'user_id,name' });
+    if (error) throw new Error(error.message);
+    console.log('[bills] override saved:', row.name, row.amount, 'day', row.due_day);
     res.json({ ok: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
