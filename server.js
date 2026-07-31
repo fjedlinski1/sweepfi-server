@@ -1024,13 +1024,18 @@ app.get('/net-test', async (req, res) => {
 const ALPACA_KEY    = process.env.ALPACA_KEY;
 const ALPACA_SECRET = process.env.ALPACA_SECRET;
 const ALPACA_URL    = process.env.ALPACA_URL || 'https://paper-api.alpaca.markets';
+// ROTH-ROUTING: the IRA has its own keys; live-only environment
+const ALPACA_ROTH_KEY    = process.env.ALPACA_ROTH_KEY;
+const ALPACA_ROTH_SECRET = process.env.ALPACA_ROTH_SECRET;
+const ALPACA_ROTH_URL    = process.env.ALPACA_ROTH_URL || 'https://api.alpaca.markets';
 
-async function alpacaFetch(path, options = {}) {
-  const res = await fetch(ALPACA_URL + path, {
+async function alpacaFetch(path, options = {}, acct = 'taxable') {
+  const base = acct === 'roth' ? ALPACA_ROTH_URL : ALPACA_URL;
+  const res = await fetch(base + path, {
     ...options,
     headers: {
-      'APCA-API-KEY-ID': ALPACA_KEY,
-      'APCA-API-SECRET-KEY': ALPACA_SECRET,
+      'APCA-API-KEY-ID': acct === 'roth' ? ALPACA_ROTH_KEY : ALPACA_KEY,
+      'APCA-API-SECRET-KEY': acct === 'roth' ? ALPACA_ROTH_SECRET : ALPACA_SECRET,
       'Content-Type': 'application/json',
       ...(options.headers || {}),
     },
@@ -1048,12 +1053,21 @@ app.get('/alpaca-status', async (req, res) => {
   try {
     if (!ALPACA_KEY) return res.status(400).json({ error: 'ALPACA_KEY not set' });
     const acct = await alpacaFetch('/v2/account');
+    let roth = null;
+    if (ALPACA_ROTH_KEY) {
+      try {
+        const r = await alpacaFetch('/v2/account', {}, 'roth');
+        roth = { status: r.status, equity: r.equity, buying_power: r.buying_power };
+      } catch (e) { roth = { error: e.message }; }
+    }
     res.json({
-      status: acct.status,
-      paper: ALPACA_URL.includes('paper'),
-      equity: acct.equity,
-      buying_power: acct.buying_power,
-      currency: acct.currency,
+      taxable: {
+        status: acct.status,
+        paper: ALPACA_URL.includes('paper'),
+        equity: acct.equity,
+        buying_power: acct.buying_power,
+      },
+      roth,
     });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -1068,7 +1082,17 @@ app.post('/invest', async (req, res) => {
     const amount = Math.round(Number(req.body.amount) * 100) / 100;
     if (!amount || amount < 1) return res.status(400).json({ error: 'Amount must be at least $1' });
     if (amount > 25000) return res.status(400).json({ error: 'Amount exceeds safety cap ($25,000)' });
-    const symbol = (req.body.symbol || 'SPY').toUpperCase();
+    const symbol = (req.body.symbol || 'IQQ').toUpperCase();
+
+    // Roth-first: if the IRA holds enough cash, the order belongs there
+    let account = req.body.account === 'roth' ? 'roth' : 'taxable';
+    if (!req.body.account && ALPACA_ROTH_KEY) {
+      try {
+        const r = await alpacaFetch('/v2/account', {}, 'roth');
+        if (Number(r.buying_power) >= amount) account = 'roth';
+        console.log('[invest] roth buying power', r.buying_power, '-> routing to', account);
+      } catch (e) { console.log('[invest] roth check failed, using taxable:', e.message); }
+    }
 
     const order = await alpacaFetch('/v2/orders', {
       method: 'POST',
@@ -1079,11 +1103,12 @@ app.post('/invest', async (req, res) => {
         type: 'market',
         time_in_force: 'day',
       }),
-    });
-    console.log('[invest] order placed:', order.id, order.status);
+    }, account);
+    console.log('[invest] order placed in', account + ':', order.id, order.status);
     res.json({
       ok: true,
-      paper: ALPACA_URL.includes('paper'),
+      account,
+      paper: account === 'roth' ? false : ALPACA_URL.includes('paper'),
       order_id: order.id,
       symbol: order.symbol,
       notional: order.notional,
