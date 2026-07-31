@@ -599,7 +599,19 @@ app.post('/sweep-plan', async (req, res) => {
         recurringBills.push({ name, monthly: Math.round(avg * 100) / 100, occurrences: txs.length });
       }
     });
-    const upcomingBills = recurringBills.reduce((s, b) => s + b.monthly, 0);
+    let visibleBills = recurringBills;
+    try {
+      const { data: hov } = await supabase
+        .from('bill_overrides')
+        .select('name, hidden')
+        .eq('user_id', req.body.user_id)
+        .eq('hidden', true);
+      if (hov && hov.length) {
+        const hiddenSet = new Set(hov.map(o => o.name));
+        visibleBills = recurringBills.filter(b => !hiddenSet.has(b.name));
+      }
+    } catch (e) {}
+    const upcomingBills = visibleBills.reduce((s, b) => s + b.monthly, 0);
 
     // 5. Average daily discretionary spend (non-recurring outflows)
     const recurringNames = new Set(recurringBills.map(b => b.name));
@@ -648,7 +660,7 @@ app.post('/sweep-plan', async (req, res) => {
         pending: Math.round(pending * 100) / 100,
         min_buffer: MIN_BUFFER,
       },
-      recurring_bills: recurringBills.sort((a, b) => b.monthly - a.monthly),
+      recurring_bills: visibleBills.sort((a, b) => b.monthly - a.monthly),
       plan,
     });
   } catch (err) {
@@ -722,7 +734,7 @@ app.post('/expenses', async (req, res) => {
     try {
       const { data: ov } = await supabase
         .from('bill_overrides')
-        .select('name, amount, due_day')
+        .select('name, amount, due_day, hidden')
         .eq('user_id', req.body.user_id);
       if (ov && ov.length) {
         const byOv = Object.fromEntries(ov.map(o => [o.name, o]));
@@ -731,6 +743,7 @@ app.post('/expenses', async (req, res) => {
           if (o) {
             if (o.amount != null) { b.monthly = Number(o.amount); b.overridden = true; }
             if (o.due_day != null) { b.due_day = Number(o.due_day); b.overridden = true; }
+            if (o.hidden) b.hidden = true;
             b.ready_to_pay = cash - 200 >= b.monthly;
           }
         });
@@ -761,7 +774,7 @@ app.post('/expenses', async (req, res) => {
       .sort((a, b) => b.total - a.total);
 
     const totalMonthly = Math.round(outflows30.reduce((s, t) => s + t.amount, 0) * 100) / 100;
-    const totalBills = Math.round(bills.reduce((s, b) => s + b.monthly, 0) * 100) / 100;
+    const totalBills = Math.round(bills.filter(b => !b.hidden).reduce((s, b) => s + b.monthly, 0) * 100) / 100;
 
     // Debts ready to pay
     const debts = accounts
@@ -789,7 +802,7 @@ app.post('/expenses', async (req, res) => {
       .sort((a, b) => b.total - a.total)
       .slice(0, 10);
 
-    res.json({ total_monthly: totalMonthly, total_bills: totalBills, cash: Math.round(cash*100)/100, bills, categories, debts, top_merchants });
+    res.json({ total_monthly: totalMonthly, total_bills: totalBills, cash: Math.round(cash*100)/100, bills: bills.filter(b => !b.hidden), categories, debts, top_merchants });
   } catch (err) {
     console.log('[expenses] error:', err.message);
     res.status(400).json({ error: err.message });
@@ -1304,13 +1317,14 @@ app.post('/guardrails/remove', async (req, res) => {
 app.post('/bills/override', async (req, res) => {
   try {
     if (!req.body.user_id || !req.body.name) return res.status(400).json({ error: 'user_id and name required' });
+    // HIDE-BILLS: partial updates — only touch fields provided
     const row = {
       user_id: req.body.user_id,
       name: req.body.name.toLowerCase(),
-      amount: req.body.amount != null ? Number(req.body.amount) : null,
-      due_day: req.body.due_day != null ? Math.min(31, Math.max(1, Number(req.body.due_day))) : null,
-      created_at: new Date().toISOString(),
     };
+    if (req.body.amount != null) row.amount = Number(req.body.amount);
+    if (req.body.due_day != null) row.due_day = Math.min(31, Math.max(1, Number(req.body.due_day)));
+    if (req.body.hidden != null) row.hidden = req.body.hidden === true;
     const { error } = await supabase.from('bill_overrides').upsert(row, { onConflict: 'user_id,name' });
     if (error) throw new Error(error.message);
     console.log('[bills] override saved:', row.name, row.amount, 'day', row.due_day);
