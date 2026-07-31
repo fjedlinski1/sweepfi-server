@@ -168,7 +168,8 @@ app.post('/get-accounts', async (req, res) => {
           type: (m.type === 'credit' || m.type === 'loan') ? 'credit'
               : (m.type === 'cash' ? 'depository' : 'investment'),
           subtype: m.type,
-          manual: true,
+          manual: true, // MANUAL-EDIT
+          payment: m.payment, due_day: m.due_day, apr: m.apr,
           balances: { current: Number(m.balance), available: m.type === 'cash' ? Number(m.balance) : null },
           institution: 'Manual',
         }));
@@ -1471,6 +1472,12 @@ app.post('/manual-accounts/save', async (req, res) => {
       created_at: new Date().toISOString(),
     }, { onConflict: 'user_id,name' });
     if (error) throw new Error(error.message);
+    if (req.body.original_name && req.body.original_name !== req.body.name.trim()) {
+      await supabase.from('manual_accounts').delete()
+        .eq('user_id', req.body.user_id)
+        .eq('name', req.body.original_name);
+      console.log('[manual] renamed', req.body.original_name, '->', req.body.name.trim());
+    }
     console.log('[manual] saved', req.body.name, req.body.balance);
     res.json({ ok: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
