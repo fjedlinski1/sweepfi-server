@@ -765,7 +765,7 @@ app.post('/expenses', async (req, res) => {
     try {
       const { data: ov } = await supabase
         .from('bill_overrides')
-        .select('name, amount, due_day, hidden')
+        .select('name, amount, due_day, hidden, display_name')
         .eq('user_id', req.body.user_id);
       if (ov && ov.length) {
         const byOv = Object.fromEntries(ov.map(o => [o.name, o]));
@@ -775,6 +775,7 @@ app.post('/expenses', async (req, res) => {
             if (o.amount != null) { b.monthly = Number(o.amount); b.overridden = true; }
             if (o.due_day != null) { b.due_day = Number(o.due_day); b.overridden = true; }
             if (o.hidden) b.hidden = true;
+            if (o.display_name) b.display_name = o.display_name;
             b.ready_to_pay = cash - 200 >= b.monthly;
           }
         });
@@ -925,7 +926,7 @@ async function sendBrief(reason) {
       });
       const ed = await er.json();
       const due = (ed.bills || []).filter(b => b.days_until != null && b.days_until <= 3);
-      if (due.length) dueLine = 'Due soon: ' + due.map(b => b.name + ' ' + money(b.monthly) + ' (' + b.days_until + 'd)').join(', ');
+      if (due.length) dueLine = 'Due soon: ' + due.map(b => (b.display_name || b.name) + ' ' + money(b.monthly) + ' (' + b.days_until + 'd)').join(', ');
     } catch (e) {}
     const pushBody = [planLine, dueLine].filter(Boolean).join('  •  ') || 'Nothing safe to sweep today — bills and cushion come first.';
     expoPushResult = await sendExpoPush(
@@ -1385,6 +1386,7 @@ app.post('/bills/override', async (req, res) => {
     if (req.body.amount != null) row.amount = Number(req.body.amount);
     if (req.body.due_day != null) row.due_day = Math.min(31, Math.max(1, Number(req.body.due_day)));
     if (req.body.hidden != null) row.hidden = req.body.hidden === true;
+    if (req.body.display_name != null) row.display_name = String(req.body.display_name).trim(); // BILL-RENAME
     const { error } = await supabase.from('bill_overrides').upsert(row, { onConflict: 'user_id,name' });
     if (error) throw new Error(error.message);
     console.log('[bills] override saved:', row.name, row.amount, 'day', row.due_day);
