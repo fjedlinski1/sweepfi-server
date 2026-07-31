@@ -592,6 +592,11 @@ app.post('/sweep-plan', async (req, res) => {
     const recurringBills = [];
     Object.entries(byName).forEach(([name, txs]) => {
       if (txs.length < 2) return;
+      // BILL-CLASSIFY: transfers, brokerage deposits, P2P, and bank fees are not bills
+      const sampleTx = txs[txs.length - 1];
+      const pfc = (sampleTx.personal_finance_category?.primary || sampleTx.category?.[0] || '').toString().toUpperCase().replace(/ /g, '_');
+      if (pfc.includes('TRANSFER') || pfc.includes('BANK_FEES')) return;
+      if (/plus ?500|coinbase|robinhood|webull|alpaca|etrade|e\*trade|fidelity|schwab|tradovate|topstepx|zelle|venmo|cash ?app|paypal|apple cash|overdraft|nsf fee|insufficient|wire (out|transfer)|brokerage|crossmint/i.test(name)) return;
       const amounts = txs.map(t => t.amount);
       const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
       const similar = amounts.every(a => Math.abs(a - avg) / avg < 0.25);
@@ -716,6 +721,11 @@ app.post('/expenses', async (req, res) => {
     const bills = [];
     Object.entries(byName).forEach(([name, txs]) => {
       if (txs.length < 2) return;
+      // BILL-CLASSIFY: transfers, brokerage deposits, P2P, and bank fees are not bills
+      const sampleTx = txs[txs.length - 1];
+      const pfc = (sampleTx.personal_finance_category?.primary || sampleTx.category?.[0] || '').toString().toUpperCase().replace(/ /g, '_');
+      if (pfc.includes('TRANSFER') || pfc.includes('BANK_FEES')) return;
+      if (/plus ?500|coinbase|robinhood|webull|alpaca|etrade|e\*trade|fidelity|schwab|tradovate|topstepx|zelle|venmo|cash ?app|paypal|apple cash|overdraft|nsf fee|insufficient|wire (out|transfer)|brokerage|crossmint/i.test(name)) return;
       const amounts = txs.map(t => t.amount);
       const avg = amounts.reduce((a, b) => a + b, 0) / amounts.length;
       if (amounts.every(a => Math.abs(a - avg) / avg < 0.25) && avg >= 5) {
