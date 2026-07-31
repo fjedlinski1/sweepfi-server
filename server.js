@@ -158,6 +158,22 @@ app.post('/get-accounts', async (req, res) => {
       }
     }
 
+    if (req.body.user_id) {
+      try {
+        const man = await getManualAccounts(req.body.user_id);
+        man.forEach(m => allAccounts.push({
+          account_id: 'manual-' + m.name.toLowerCase().replace(/\s+/g, '-'),
+          name: m.name,
+          official_name: m.name,
+          type: (m.type === 'credit' || m.type === 'loan') ? 'credit'
+              : (m.type === 'cash' ? 'depository' : 'investment'),
+          subtype: m.type,
+          manual: true,
+          balances: { current: Number(m.balance), available: m.type === 'cash' ? Number(m.balance) : null },
+          institution: 'Manual',
+        }));
+      } catch (e) { console.log('[get-accounts] manual skip:', e.message); }
+    }
     console.log('[get-accounts] got', allAccounts.length, 'accounts from', tokens.length, 'bank(s)');
     res.json({ accounts: allAccounts });
   } catch (err) {
@@ -635,7 +651,12 @@ app.post('/sweep-plan', async (req, res) => {
     const safe = Math.max(0, Math.round((cash - upcomingBills - spendingCushion - pending - MIN_BUFFER) * 100) / 100);
 
     // 8. Allocation plan against real debts (Plaid credit accounts)
-    const debts = accounts.filter(a => a.type === 'credit' && (a.balances.current || 0) > 0);
+    let debts = accounts.filter(a => a.type === 'credit' && (a.balances.current || 0) > 0);
+    try {
+      const man = await getManualAccounts(req.body.user_id);
+      man.filter(m => (m.type === 'credit' || m.type === 'loan') && Number(m.balance) > 0)
+        .forEach(m => debts.push({ name: m.name, balances: { current: Number(m.balance) } }));
+    } catch (e) {}
     const plan = [];
     let remaining = safe;
     if (safe > 0) {
@@ -789,7 +810,7 @@ app.post('/expenses', async (req, res) => {
     const totalBills = Math.round(bills.filter(b => !b.hidden).reduce((s, b) => s + b.monthly, 0) * 100) / 100;
 
     // Debts ready to pay
-    const debts = accounts
+    const plaidDebts = accounts
       .filter(a => a.type === 'credit' && (a.balances.current || 0) > 0)
       .map(d => ({
         name: d.name,
@@ -797,6 +818,26 @@ app.post('/expenses', async (req, res) => {
         min_payment: d.balances.minimum_payment || null,
         ready_to_pay: cash - 200 >= (d.balances.minimum_payment || d.balances.current * 0.03),
       }));
+    let manualDebts = [];
+    try {
+      const man = await getManualAccounts(req.body.user_id);
+      manualDebts = man.filter(m => (m.type === 'credit' || m.type === 'loan') && Number(m.balance) > 0)
+        .map(m => {
+          const key = m.name.toLowerCase().split(' ')[0];
+          const matched = key.length >= 4 ? bills.find(b => b.name.includes(key)) : null;
+          const pay = matched ? matched.monthly : null;
+          return {
+            name: m.name,
+            balance: Math.round(Number(m.balance) * 100) / 100,
+            min_payment: pay,
+            apr: m.apr,
+            manual: true,
+            matched_bill: matched ? matched.name : null,
+            ready_to_pay: cash - 200 >= (pay || Number(m.balance) * 0.03),
+          };
+        });
+    } catch (e) {}
+    const debts = [...plaidDebts, ...manualDebts];
 
     console.log('[expenses]', bills.length, 'bills,', categories.length, 'categories, total out:', totalMonthly);
     const recurringSet = new Set(bills.map(b => b.name));
@@ -1179,6 +1220,13 @@ async function snapshotNetWorth(userId) {
       }
     } catch (e) { console.log('[snapshot] token skip:', e.response?.data?.error_code || e.message); }
   }
+  try {
+    const man = await getManualAccounts(userId);
+    man.forEach(m => {
+      const bal = Number(m.balance) || 0;
+      if (m.type === 'credit' || m.type === 'loan') debt += bal; else assets += bal;
+    });
+  } catch (e) {}
   const row = {
     user_id: userId,
     date: new Date().toISOString().split('T')[0],
@@ -1340,6 +1388,46 @@ app.post('/bills/override', async (req, res) => {
     const { error } = await supabase.from('bill_overrides').upsert(row, { onConflict: 'user_id,name' });
     if (error) throw new Error(error.message);
     console.log('[bills] override saved:', row.name, row.amount, 'day', row.due_day);
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+
+// ── MANUAL-ACCOUNTS ───────────────────────────────────────────────────────
+async function getManualAccounts(userId) {
+  const { data } = await supabase
+    .from('manual_accounts')
+    .select('name, type, balance, apr')
+    .eq('user_id', userId);
+  return data || [];
+}
+
+app.post('/manual-accounts/save', async (req, res) => {
+  try {
+    if (!req.body.user_id || !req.body.name || req.body.balance == null) {
+      return res.status(400).json({ error: 'user_id, name, balance required' });
+    }
+    const { error } = await supabase.from('manual_accounts').upsert({
+      user_id: req.body.user_id,
+      name: req.body.name.trim(),
+      type: ['credit', 'loan', 'cash', 'investment'].includes(req.body.type) ? req.body.type : 'credit',
+      balance: Number(req.body.balance),
+      apr: req.body.apr != null && req.body.apr !== '' ? Number(req.body.apr) : null,
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,name' });
+    if (error) throw new Error(error.message);
+    console.log('[manual] saved', req.body.name, req.body.balance);
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.post('/manual-accounts/remove', async (req, res) => {
+  try {
+    const { error } = await supabase.from('manual_accounts')
+      .delete()
+      .eq('user_id', req.body.user_id)
+      .eq('name', req.body.name);
+    if (error) throw new Error(error.message);
     res.json({ ok: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
