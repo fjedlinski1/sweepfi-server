@@ -790,12 +790,23 @@ function briefHtml(d) {
 }
 
 async function sendBrief(reason) {
-  if (!NOTIFY_USER_ID || (!NTFY_TOPIC && !(RESEND_KEY && NOTIFY_EMAIL))) {
-    console.log('[brief] skipped — need NOTIFY_USER_ID plus NTFY_TOPIC and/or RESEND_KEY+NOTIFY_EMAIL');
+  if (!NOTIFY_USER_ID) {
+    console.log('[brief] skipped — NOTIFY_USER_ID not set');
     return { skipped: true };
   }
   const data = await buildBrief(NOTIFY_USER_ID);
   const money = (n) => '$' + Number(n || 0).toFixed(2);
+  // Branded app push via Expo
+  let expoPushResult = null;
+  try {
+    const planLine = (data.plan || []).map(p => p.name + ' ' + money(p.amount)).join(' · ');
+    expoPushResult = await sendExpoPush(
+      NOTIFY_USER_ID,
+      'Good morning — ' + money(data.safe) + ' safe to invest',
+      planLine || 'Nothing safe to sweep today — bills and cushion come first.'
+    );
+  } catch (e) { console.log('[push] error:', e.message); }
+
   // Phone push via ntfy
   let pushStatus = null;
   if (NTFY_TOPIC) {
@@ -1117,6 +1128,35 @@ app.post('/history', async (req, res) => {
     res.json({ points: data || [] });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
+
+
+// ── EXPO-PUSH ─────────────────────────────────────────────────────────────
+app.post('/register-push', async (req, res) => {
+  try {
+    if (!req.body.user_id || !req.body.token) return res.status(400).json({ error: 'user_id and token required' });
+    const { error } = await supabase.from('push_tokens').upsert(
+      { user_id: req.body.user_id, token: req.body.token, created_at: new Date().toISOString() },
+      { onConflict: 'token' }
+    );
+    if (error) throw new Error(error.message);
+    console.log('[push] registered token for', req.body.user_id);
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+async function sendExpoPush(userId, title, body) {
+  const { data: rows } = await supabase.from('push_tokens').select('token').eq('user_id', userId);
+  if (!rows || !rows.length) { console.log('[push] no tokens for', userId); return null; }
+  const messages = rows.map(r => ({ to: r.token, sound: 'default', title, body }));
+  const res = await fetch('https://exp.host/--/api/v2/push/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(messages),
+  });
+  const out = await res.json().catch(() => ({}));
+  console.log('[push] expo send:', res.status, JSON.stringify(out).slice(0, 160));
+  return out;
+}
 
 app.listen(process.env.PORT || 3001, () => {
   console.log('\n✓ SweepFi server running on http://192.168.1.155:3001');
