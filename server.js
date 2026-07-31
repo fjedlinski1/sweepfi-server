@@ -632,6 +632,14 @@ app.post('/sweep-plan', async (req, res) => {
         visibleBills = recurringBills.filter(b => !hiddenSet.has(b.name));
       }
     } catch (e) {}
+    try {
+      const manB = await getManualAccounts(req.body.user_id);
+      manB.filter(m => (m.type === 'credit' || m.type === 'loan') && m.payment && m.due_day).forEach(m => {
+        const key = m.name.toLowerCase().split(' ')[0];
+        if (key.length >= 4 && visibleBills.some(b => b.name.includes(key))) return;
+        visibleBills = visibleBills.concat([{ name: m.name.toLowerCase(), monthly: Number(m.payment) }]);
+      });
+    } catch (e) {}
     const upcomingBills = visibleBills.reduce((s, b) => s + b.monthly, 0);
 
     // 5. Average daily discretionary spend (non-recurring outflows)
@@ -761,6 +769,24 @@ app.post('/expenses', async (req, res) => {
         });
       }
     });
+    // MANUAL-DUE: manual accounts with a payment + due day become bills
+    try {
+      const manB = await getManualAccounts(req.body.user_id);
+      manB.filter(m => (m.type === 'credit' || m.type === 'loan') && m.payment && m.due_day).forEach(m => {
+        const key = m.name.toLowerCase().split(' ')[0];
+        if (key.length >= 4 && bills.some(b => b.name.includes(key))) return;
+        const paidTx = outflows30.filter(t => (t.merchant_name || t.name || '').toLowerCase().includes(key)).map(t => t.date).sort().pop();
+        bills.push({
+          name: m.name.toLowerCase(),
+          monthly: Math.round(Number(m.payment) * 100) / 100,
+          last_date: paidTx || null,
+          due_day: Number(m.due_day),
+          manual_bill: true,
+          ready_to_pay: cash - 200 >= Number(m.payment),
+        });
+      });
+    } catch (e) {}
+
     // BILL-OVERRIDES: user-set amount/due day win over detection
     try {
       const { data: ov } = await supabase
@@ -1424,7 +1450,7 @@ app.post('/bills/override', async (req, res) => {
 async function getManualAccounts(userId) {
   const { data } = await supabase
     .from('manual_accounts')
-    .select('name, type, balance, apr')
+    .select('name, type, balance, apr, due_day, payment')
     .eq('user_id', userId);
   return data || [];
 }
@@ -1440,6 +1466,8 @@ app.post('/manual-accounts/save', async (req, res) => {
       type: ['credit', 'loan', 'cash', 'investment'].includes(req.body.type) ? req.body.type : 'credit',
       balance: Number(req.body.balance),
       apr: req.body.apr != null && req.body.apr !== '' ? Number(req.body.apr) : null,
+      due_day: req.body.due_day != null && req.body.due_day !== '' ? Math.min(31, Math.max(1, Number(req.body.due_day))) : null,
+      payment: req.body.payment != null && req.body.payment !== '' ? Number(req.body.payment) : null,
       created_at: new Date().toISOString(),
     }, { onConflict: 'user_id,name' });
     if (error) throw new Error(error.message);
