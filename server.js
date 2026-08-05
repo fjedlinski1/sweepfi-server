@@ -1651,11 +1651,48 @@ function parseCreditReport(text) {
   return out.filter(a => { const k = a.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 40);
 }
 
+
+// ── AI-IMPORT: LLM parsing for credit reports ────────────────────────────
+async function aiParseReport(text) {
+  const body = {
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 4000,
+    messages: [{
+      role: 'user',
+      content: 'Extract every debt tradeline from this credit report text (the text may be jumbled from copy-paste — reconstruct carefully). Return ONLY a JSON array, no markdown fences, no prose. Each item: {"name": creditor name as shown, "balance": current balance as a number, "payment": monthly or scheduled payment as a number or null, "type": one of "credit" (credit cards/revolving), "loan" (installment/auto/student/mortgage/personal), "collection" (collections or charge-offs)}. Rules: skip accounts with zero balance, skip closed accounts, skip inquiries, skip non-debt items. Text:\n\n' + String(text).slice(0, 150000),
+    }],
+  };
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (d.error) throw new Error(d.error.message || 'api error');
+  const raw = (d.content || []).map(c => c.text || '').join('').replace(/```json|```/g, '').trim();
+  const arr = JSON.parse(raw.slice(raw.indexOf('['), raw.lastIndexOf(']') + 1));
+  return arr.filter(a => a && a.name && Number(a.balance) > 0).slice(0, 40).map(a => ({
+    name: String(a.name).slice(0, 60).trim(),
+    balance: Number(a.balance),
+    payment: a.payment != null && Number(a.payment) > 0 ? Number(a.payment) : null,
+    type: ['credit', 'loan', 'collection'].includes(a.type) ? a.type : 'credit',
+  }));
+}
+
 app.post('/import-report', async (req, res) => {
   try {
     if (!req.body.user_id || !req.body.text) return res.status(400).json({ error: 'user_id and text required' });
-    const found = parseCreditReport(req.body.text);
-    console.log('[import-report] parsed', found.length, 'tradelines');
+    let found = [], source = 'regex';
+    if (process.env.ANTHROPIC_API_KEY) {
+      try { found = await aiParseReport(req.body.text); source = 'ai'; }
+      catch (e) { console.log('[import-report] AI parse failed, falling back:', e.message); }
+    }
+    if (!found.length) { found = parseCreditReport(req.body.text); source = 'regex'; }
+    console.log('[import-report] parsed', found.length, 'tradelines via', source);
     res.json({ found });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
