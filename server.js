@@ -165,11 +165,11 @@ app.post('/get-accounts', async (req, res) => {
           account_id: 'manual-' + m.name.toLowerCase().replace(/\s+/g, '-'),
           name: m.name,
           official_name: m.name,
-          type: (m.type === 'credit' || m.type === 'loan') ? 'credit'
+          type: (m.type === 'credit' || m.type === 'loan' || m.type === 'collection') ? 'credit'
               : (m.type === 'cash' ? 'depository' : 'investment'),
           subtype: m.type,
           manual: true, // MANUAL-EDIT
-          payment: m.payment, due_day: m.due_day, apr: m.apr,
+          payment: m.payment, due_day: m.due_day, apr: m.apr, settled: m.settled,
           balances: { current: Number(m.balance), available: m.type === 'cash' ? Number(m.balance) : null },
           institution: 'Manual',
         }));
@@ -635,7 +635,7 @@ app.post('/sweep-plan', async (req, res) => {
     } catch (e) {}
     try {
       const manB = await getManualAccounts(req.body.user_id);
-      manB.filter(m => (m.type === 'credit' || m.type === 'loan') && m.payment && m.due_day).forEach(m => {
+      manB.filter(m => (m.type === 'credit' || m.type === 'loan' || m.type === 'collection') && m.payment && m.due_day).forEach(m => {
         const key = m.name.toLowerCase().split(' ')[0];
         if (key.length >= 4 && visibleBills.some(b => b.name.includes(key))) return;
         visibleBills = visibleBills.concat([{ name: m.name.toLowerCase(), monthly: Number(m.payment) }]);
@@ -663,7 +663,7 @@ app.post('/sweep-plan', async (req, res) => {
     let debts = accounts.filter(a => a.type === 'credit' && (a.balances.current || 0) > 0);
     try {
       const man = await getManualAccounts(req.body.user_id);
-      man.filter(m => (m.type === 'credit' || m.type === 'loan') && Number(m.balance) > 0)
+      man.filter(m => (m.type === 'credit' || m.type === 'loan' || m.type === 'collection') && Number(m.balance) > 0)
         .forEach(m => debts.push({ name: m.name, balances: { current: Number(m.balance) } }));
     } catch (e) {}
     const plan = [];
@@ -773,7 +773,7 @@ app.post('/expenses', async (req, res) => {
     // MANUAL-DUE: manual accounts with a payment + due day become bills
     try {
       const manB = await getManualAccounts(req.body.user_id);
-      manB.filter(m => (m.type === 'credit' || m.type === 'loan') && m.payment && m.due_day).forEach(m => {
+      manB.filter(m => (m.type === 'credit' || m.type === 'loan' || m.type === 'collection') && m.payment && m.due_day).forEach(m => {
         const key = m.name.toLowerCase().split(' ')[0];
         if (key.length >= 4 && bills.some(b => b.name.includes(key))) return;
         const paidTx = outflows30.filter(t => (t.merchant_name || t.name || '').toLowerCase().includes(key)).map(t => t.date).sort().pop();
@@ -849,23 +849,37 @@ app.post('/expenses', async (req, res) => {
     let manualDebts = [];
     try {
       const man = await getManualAccounts(req.body.user_id);
-      manualDebts = man.filter(m => (m.type === 'credit' || m.type === 'loan') && Number(m.balance) > 0)
+      manualDebts = man.filter(m => (m.type === 'credit' || m.type === 'loan' || m.type === 'collection') && Number(m.balance) > 0)
         .map(m => {
           const key = m.name.toLowerCase().split(' ')[0];
           const matched = key.length >= 4 ? bills.find(b => b.name.includes(key)) : null;
           const pay = matched ? matched.monthly : null;
+          const owed = m.settled != null ? Number(m.settled) : Number(m.balance);
           return {
             name: m.name,
-            balance: Math.round(Number(m.balance) * 100) / 100,
+            balance: Math.round(owed * 100) / 100,
+            original_balance: Math.round(Number(m.balance) * 100) / 100,
+            settled: m.settled != null ? Number(m.settled) : null,
+            is_collection: m.type === 'collection',
             min_payment: pay,
-            apr: m.apr,
+            apr: m.apr != null ? Number(m.apr) : null,
             manual: true,
             matched_bill: matched ? matched.name : null,
-            ready_to_pay: cash - 200 >= (pay || Number(m.balance) * 0.03),
+            ready_to_pay: cash - 200 >= (pay || owed * 0.03),
           };
         });
     } catch (e) {}
-    const debts = [...plaidDebts, ...manualDebts];
+    let debts = [...plaidDebts, ...manualDebts];
+    try {
+      const { data: ds } = await supabase.from('debt_settings').select('name, apr').eq('user_id', req.body.user_id);
+      if (ds && ds.length) {
+        const byD = Object.fromEntries(ds.map(o => [o.name.toLowerCase(), o.apr]));
+        debts.forEach(d => {
+          if (d.apr == null && byD[d.name.toLowerCase()] != null) d.apr = Number(byD[d.name.toLowerCase()]);
+        });
+      }
+    } catch (e) {}
+    debts.sort((a, b) => (b.apr ?? -1) - (a.apr ?? -1));
 
     console.log('[expenses]', bills.length, 'bills,', categories.length, 'categories, total out:', totalMonthly);
     const recurringSet = new Set(bills.map(b => b.name));
@@ -1277,7 +1291,7 @@ async function snapshotNetWorth(userId) {
     const man = await getManualAccounts(userId);
     man.forEach(m => {
       const bal = Number(m.balance) || 0;
-      if (m.type === 'credit' || m.type === 'loan') debt += bal; else assets += bal;
+      if (m.type === 'credit' || m.type === 'loan' || m.type === 'collection') debt += bal; else assets += bal;
     });
   } catch (e) {}
   const row = {
@@ -1451,7 +1465,7 @@ app.post('/bills/override', async (req, res) => {
 async function getManualAccounts(userId) {
   const { data } = await supabase
     .from('manual_accounts')
-    .select('name, type, balance, apr, due_day, payment')
+    .select('name, type, balance, apr, due_day, payment, settled')
     .eq('user_id', userId);
   return data || [];
 }
@@ -1464,11 +1478,12 @@ app.post('/manual-accounts/save', async (req, res) => {
     const { error } = await supabase.from('manual_accounts').upsert({
       user_id: req.body.user_id,
       name: req.body.name.trim(),
-      type: ['credit', 'loan', 'cash', 'investment'].includes(req.body.type) ? req.body.type : 'credit',
+      type: ['credit', 'loan', 'cash', 'investment', 'collection'].includes(req.body.type) ? req.body.type : 'credit',
       balance: Number(req.body.balance),
       apr: req.body.apr != null && req.body.apr !== '' ? Number(req.body.apr) : null,
       due_day: req.body.due_day != null && req.body.due_day !== '' ? Math.min(31, Math.max(1, Number(req.body.due_day))) : null,
       payment: req.body.payment != null && req.body.payment !== '' ? Number(req.body.payment) : null,
+      settled: req.body.settled != null && req.body.settled !== '' ? Number(req.body.settled) : null, // APR-COLLECTIONS
       created_at: new Date().toISOString(),
     }, { onConflict: 'user_id,name' });
     if (error) throw new Error(error.message);
@@ -1526,6 +1541,25 @@ app.post('/remove-institution', async (req, res) => {
     if (error) throw new Error(error.message);
     console.log('[remove-institution] removed', rows.length, 'connection(s), revoked', revoked);
     res.json({ ok: true, removed: rows.length, revoked });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+
+// ── APR-COLLECTIONS: set APR on any debt ─────────────────────────────────
+app.post('/debts/apr', async (req, res) => {
+  try {
+    if (!req.body.user_id || !req.body.name || req.body.apr == null) {
+      return res.status(400).json({ error: 'user_id, name, apr required' });
+    }
+    const { error } = await supabase.from('debt_settings').upsert({
+      user_id: req.body.user_id,
+      name: req.body.name.toLowerCase(),
+      apr: Number(req.body.apr),
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,name' });
+    if (error) throw new Error(error.message);
+    console.log('[debts] apr set:', req.body.name, req.body.apr);
+    res.json({ ok: true });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
