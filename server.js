@@ -1653,13 +1653,13 @@ function parseCreditReport(text) {
 
 
 // ── AI-IMPORT: LLM parsing for credit reports ────────────────────────────
-async function aiParseReport(text) {
+async function aiParseReport(text, existing) { // SMART-IMPORT
   const body = {
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 4000,
+    max_tokens: 8000,
     messages: [{
       role: 'user',
-      content: 'Extract every debt tradeline from this credit report text (the text may be jumbled from copy-paste — reconstruct carefully). Return ONLY a JSON array, no markdown fences, no prose. Each item: {"name": creditor name as shown, "balance": current balance as a number, "payment": monthly or scheduled payment as a number or null, "type": one of "credit" (credit cards/revolving), "loan" (installment/auto/student/mortgage/personal), "collection" (collections or charge-offs)}. Rules: skip accounts with zero balance, skip closed accounts, skip inquiries, skip non-debt items. Text:\n\n' + String(text).slice(0, 150000),
+      content: 'You are matching a credit report against a user\'s existing accounts. Existing accounts (JSON): ' + JSON.stringify((existing || []).slice(0, 60)) + '\n\nExtract every debt tradeline from the credit report text below (the text may be jumbled from copy-paste — reconstruct carefully). Return ONLY a compact JSON array, no markdown fences, no prose. Each item: {"name": creditor/account name as shown, "balance": current balance as a number, "payment": monthly or scheduled payment as a number or null, "type": "credit" (cards/revolving) | "loan" (installment/auto/student/mortgage/personal) | "collection" (collections or charge-offs), "matches": the name of the ONE existing account this tradeline is, copied EXACTLY from the existing list, or null}. Matching rules — use common sense: the same account is often named differently on a report vs the list (e.g. "APPLE CARD/GS BANK" is "Apple Card"); a similar balance is strong evidence of a match. The same issuer can have MULTIPLE different accounts (a card and an auto loan from the same bank are different accounts) — never merge different accounts, and when unsure set matches to null. Extraction rules: include EVERY open account with a balance above zero, including collections and charge-offs; skip zero-balance accounts, closed accounts, and inquiries. Report text:\n\n' + String(text).slice(0, 150000),
     }],
   };
   const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1680,6 +1680,7 @@ async function aiParseReport(text) {
     balance: Number(a.balance),
     payment: a.payment != null && Number(a.payment) > 0 ? Number(a.payment) : null,
     type: ['credit', 'loan', 'collection'].includes(a.type) ? a.type : 'credit',
+    matches: a.matches != null && String(a.matches).trim() ? String(a.matches).slice(0, 60).trim() : null,
   }));
 }
 
@@ -1688,7 +1689,7 @@ app.post('/import-report', async (req, res) => {
     if (!req.body.user_id || !req.body.text) return res.status(400).json({ error: 'user_id and text required' });
     let found = [], source = 'regex';
     if (process.env.ANTHROPIC_API_KEY) {
-      try { found = await aiParseReport(req.body.text); source = 'ai'; }
+      try { found = await aiParseReport(req.body.text, req.body.existing); source = 'ai'; }
       catch (e) { console.log('[import-report] AI parse failed, falling back:', e.message); }
     }
     if (!found.length) { found = parseCreditReport(req.body.text); source = 'regex'; }
@@ -1708,6 +1709,7 @@ app.post('/import-report-confirm', async (req, res) => {
       type: ['credit', 'loan', 'collection'].includes(a.type) ? a.type : 'credit',
       balance: Number(a.balance) || 0,
       payment: a.payment != null && a.payment !== '' ? Number(a.payment) : null,
+      matches: a.matches != null && String(a.matches).trim() ? String(a.matches).slice(0, 60).trim() : null,
     })).filter(r => r.name && r.balance > 0);
     const { data: existing } = await supabase.from('manual_accounts').select('name').eq('user_id', req.body.user_id);
     const exNames = (existing || []).map(e => e.name);
@@ -1716,8 +1718,8 @@ app.post('/import-report-confirm', async (req, res) => {
     const errs = [];
     for (const r of rows) {
       try {
-        const match = exNames.find(n => n.toLowerCase() === r.name.toLowerCase())
-          || exNames.find(n => keyOf(n).length >= 4 && keyOf(n) === keyOf(r.name));
+        const match = (r.matches && exNames.find(n => n.toLowerCase() === r.matches.toLowerCase()))
+          || exNames.find(n => n.toLowerCase() === r.name.toLowerCase());
         if (match) {
           const { error } = await supabase.from('manual_accounts')
             .update({ balance: r.balance, payment: r.payment })
@@ -1725,7 +1727,8 @@ app.post('/import-report-confirm', async (req, res) => {
           if (error) throw new Error(error.message);
           updated++;
         } else {
-          const { error } = await supabase.from('manual_accounts').insert(r);
+          const { matches, ...ins } = r;
+          const { error } = await supabase.from('manual_accounts').insert(ins);
           if (error) throw new Error(error.message);
           exNames.push(r.name);
           imported++;
