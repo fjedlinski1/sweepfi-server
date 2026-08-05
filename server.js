@@ -1702,17 +1702,39 @@ app.post('/import-report-confirm', async (req, res) => {
     if (!req.body.user_id || !Array.isArray(req.body.accounts) || !req.body.accounts.length) {
       return res.status(400).json({ error: 'user_id and accounts required' });
     }
-    const rows = req.body.accounts.slice(0, 40).map(a => ({
+    const rows = req.body.accounts.slice(0, 40).map(a => ({ // IMPORT-DEDUPE
       user_id: req.body.user_id,
       name: String(a.name).slice(0, 60).trim(),
       type: ['credit', 'loan', 'collection'].includes(a.type) ? a.type : 'credit',
       balance: Number(a.balance) || 0,
       payment: a.payment != null && a.payment !== '' ? Number(a.payment) : null,
     })).filter(r => r.name && r.balance > 0);
-    const { error } = await supabase.from('manual_accounts').upsert(rows, { onConflict: 'user_id,name' });
-    if (error) throw new Error(error.message);
-    console.log('[import-report] imported', rows.length, 'accounts');
-    res.json({ ok: true, imported: rows.length });
+    const { data: existing } = await supabase.from('manual_accounts').select('name').eq('user_id', req.body.user_id);
+    const exNames = (existing || []).map(e => e.name);
+    const keyOf = (n) => String(n).toLowerCase().split(/[\s\/]+/)[0];
+    let imported = 0, updated = 0;
+    const errs = [];
+    for (const r of rows) {
+      try {
+        const match = exNames.find(n => n.toLowerCase() === r.name.toLowerCase())
+          || exNames.find(n => keyOf(n).length >= 4 && keyOf(n) === keyOf(r.name));
+        if (match) {
+          const { error } = await supabase.from('manual_accounts')
+            .update({ balance: r.balance, payment: r.payment })
+            .eq('user_id', req.body.user_id).eq('name', match);
+          if (error) throw new Error(error.message);
+          updated++;
+        } else {
+          const { error } = await supabase.from('manual_accounts').insert(r);
+          if (error) throw new Error(error.message);
+          exNames.push(r.name);
+          imported++;
+        }
+      } catch (e) { errs.push(r.name + ': ' + e.message); }
+    }
+    console.log('[import-report] imported', imported, 'updated', updated, errs.length ? 'errors: ' + errs.join(' | ') : '');
+    if (!imported && !updated && errs.length) return res.status(400).json({ error: errs[0] });
+    res.json({ ok: true, imported: imported + updated, added: imported, updated });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
