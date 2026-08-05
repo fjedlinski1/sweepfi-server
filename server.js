@@ -5,7 +5,7 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
 
 // ── Credentials — paste your keys here ───────────────────────────────────
 const PLAID_CLIENT_ID = process.env.PLAID_CLIENT_ID;
@@ -1686,13 +1686,22 @@ async function aiParseReport(text, existing) { // SMART-IMPORT
 
 app.post('/import-report', async (req, res) => {
   try {
-    if (!req.body.user_id || !req.body.text) return res.status(400).json({ error: 'user_id and text required' });
+    if (!req.body.user_id || (!req.body.text && !req.body.file_b64)) return res.status(400).json({ error: 'user_id and text or file_b64 required' });
+    let reportText = req.body.text; // UPLOAD-REPORT
+    if (!reportText && req.body.file_b64) {
+      const pdfParse = require('pdf-parse');
+      const buf = Buffer.from(String(req.body.file_b64), 'base64');
+      const parsed = await pdfParse(buf);
+      reportText = parsed.text || '';
+      console.log('[import-report] pdf extracted', reportText.length, 'chars,', parsed.numpages, 'pages');
+      if (!reportText.trim()) return res.status(400).json({ error: 'Could not read text from this PDF — it may be a scanned image. Paste the text instead.' });
+    }
     let found = [], source = 'regex';
     if (process.env.ANTHROPIC_API_KEY) {
-      try { found = await aiParseReport(req.body.text, req.body.existing); source = 'ai'; }
+      try { found = await aiParseReport(reportText, req.body.existing); source = 'ai'; }
       catch (e) { console.log('[import-report] AI parse failed, falling back:', e.message); }
     }
-    if (!found.length) { found = parseCreditReport(req.body.text); source = 'regex'; }
+    if (!found.length) { found = parseCreditReport(reportText); source = 'regex'; }
     console.log('[import-report] parsed', found.length, 'tradelines via', source);
     res.json({ found });
   } catch (err) { res.status(400).json({ error: err.message }); }
