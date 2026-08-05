@@ -27,6 +27,36 @@ const plaid = new PlaidApi(plaidConfig);
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ── Health check ──────────────────────────────────────────────────────────
+
+// ── ADJUSTABLE-BUFFER ────────────────────────────────────────────────────
+async function getUserBuffer(user_id) {
+  try {
+    const { data } = await supabase.from('user_settings').select('min_buffer').eq('user_id', user_id).maybeSingle();
+    const v = data && data.min_buffer != null ? Number(data.min_buffer) : 200;
+    return isFinite(v) && v >= 0 ? v : 200;
+  } catch (e) { return 200; }
+}
+app.use(async (req, res, next) => {
+  req.minBuffer = 200;
+  try { if (req.body && req.body.user_id) req.minBuffer = await getUserBuffer(req.body.user_id); } catch (e) {}
+  next();
+});
+app.post('/settings/save', async (req, res) => {
+  try {
+    if (!req.body.user_id || req.body.min_buffer == null || req.body.min_buffer === '') {
+      return res.status(400).json({ error: 'user_id and min_buffer required' });
+    }
+    const mb = Number(req.body.min_buffer);
+    if (!isFinite(mb) || mb < 0) return res.status(400).json({ error: 'Buffer must be a number ≥ 0' });
+    const { error } = await supabase.from('user_settings').upsert({
+      user_id: req.body.user_id, min_buffer: mb, updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id' });
+    if (error) throw new Error(error.message);
+    console.log('[settings] min_buffer set:', mb);
+    res.json({ ok: true, min_buffer: mb });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
@@ -766,7 +796,7 @@ app.post('/expenses', async (req, res) => {
           monthly: Math.round(avg * 100) / 100,
           last_date: txs.map(t => t.date).sort().pop(),
           due_day: dueDay,
-          ready_to_pay: cash - 200 >= avg,
+          ready_to_pay: cash - req.minBuffer >= avg,
         });
       }
     });
@@ -783,7 +813,7 @@ app.post('/expenses', async (req, res) => {
           last_date: paidTx || null,
           due_day: Number(m.due_day),
           manual_bill: true,
-          ready_to_pay: cash - 200 >= Number(m.payment),
+          ready_to_pay: cash - req.minBuffer >= Number(m.payment),
         });
       });
     } catch (e) {}
@@ -803,7 +833,7 @@ app.post('/expenses', async (req, res) => {
             if (o.due_day != null) { b.due_day = Number(o.due_day); b.overridden = true; }
             if (o.hidden) b.hidden = true;
             if (o.display_name) b.display_name = o.display_name;
-            b.ready_to_pay = cash - 200 >= b.monthly;
+            b.ready_to_pay = cash - req.minBuffer >= b.monthly;
           }
         });
       }
@@ -844,7 +874,7 @@ app.post('/expenses', async (req, res) => {
         name: d.name,
         balance: Math.round(d.balances.current * 100) / 100,
         min_payment: d.balances.minimum_payment || null,
-        ready_to_pay: cash - 200 >= (d.balances.minimum_payment || d.balances.current * 0.03),
+        ready_to_pay: cash - req.minBuffer >= (d.balances.minimum_payment || d.balances.current * 0.03),
       }));
     let manualDebts = [];
     try {
@@ -865,7 +895,7 @@ app.post('/expenses', async (req, res) => {
             apr: m.apr != null ? Number(m.apr) : null,
             manual: true,
             matched_bill: matched ? matched.name : null,
-            ready_to_pay: cash - 200 >= (pay || owed * 0.03),
+            ready_to_pay: cash - req.minBuffer >= (pay || owed * 0.03),
           };
         });
     } catch (e) {}
