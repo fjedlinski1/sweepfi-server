@@ -45,7 +45,7 @@ app.post('/settings/save', async (req, res) => {
   try {
     if (!req.body.user_id) return res.status(400).json({ error: 'user_id required' });
     const row = { user_id: req.body.user_id, updated_at: new Date().toISOString() }; // PLAN-TODOS
-    for (const k of ['min_buffer', 'birth_year', 'retire_age', 'monthly_invest', 'roth_ytd', 'k401_ytd']) {
+    for (const k of ['min_buffer', 'birth_year', 'retire_age', 'monthly_invest', 'roth_ytd', 'k401_ytd', 'debt_extra']) {
       if (req.body[k] != null && req.body[k] !== '') {
         const v = Number(req.body[k]);
         if (!isFinite(v) || v < 0) return res.status(400).json({ error: 'Invalid ' + k });
