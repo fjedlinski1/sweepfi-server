@@ -146,7 +146,7 @@ app.post('/sandbox-setup', async (req, res) => {
     }
 
     // Fetch accounts immediately
-    const accts = await plaid.accountsGet({ access_token: accessToken });
+    const accts = await plaid.accountsBalanceGet({ access_token: accessToken });
     console.log('[sandbox-setup] got', accts.data.accounts.length, 'accounts');
 
     res.json({
@@ -184,7 +184,7 @@ app.post('/get-accounts', async (req, res) => {
     let allAccounts = [];
     for (const t of tokens) {
       try {
-        const r = await plaid.accountsGet({ access_token: t.access_token });
+        const r = await plaid.accountsBalanceGet({ access_token: t.access_token });
         const withInst = r.data.accounts.map(a => ({ ...a, institution: t.institution || null }));
         allAccounts = allAccounts.concat(withInst);
       } catch (err) {
@@ -615,7 +615,7 @@ app.post('/sweep-plan', async (req, res) => {
     let accounts = [], transactions = [];
     for (const t of tokens) {
       try {
-        const a = await plaid.accountsGet({ access_token: t.access_token });
+        const a = await plaid.accountsBalanceGet({ access_token: t.access_token });
         accounts = accounts.concat(a.data.accounts.map(x => ({ ...x, institution: t.institution })));
       } catch (e) { console.log('[sweep-plan] accounts fail:', e.response?.data?.error_code || e.message); }
       try {
@@ -755,7 +755,7 @@ app.post('/expenses', async (req, res) => {
     let transactions = [], accounts = [];
     for (const t of tokens) {
       try {
-        const a = await plaid.accountsGet({ access_token: t.access_token });
+        const a = await plaid.accountsBalanceGet({ access_token: t.access_token });
         accounts = accounts.concat(a.data.accounts);
       } catch (e) {}
       try {
@@ -1337,7 +1337,7 @@ async function snapshotNetWorth(userId) {
   let assets = 0, debt = 0;
   for (const t of tokens) {
     try {
-      const r = await plaid.accountsGet({ access_token: t.access_token });
+      const r = await plaid.accountsBalanceGet({ access_token: t.access_token });
       for (const a of r.data.accounts) {
         const bal = a.balances.current ?? a.balances.available ?? 0;
         if (a.type === 'credit') debt += bal;
