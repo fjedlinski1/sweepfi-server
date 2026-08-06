@@ -44,7 +44,8 @@ app.use(async (req, res, next) => {
 app.post('/settings/save', async (req, res) => {
   try {
     if (!req.body.user_id) return res.status(400).json({ error: 'user_id required' });
-    const row = { user_id: req.body.user_id, updated_at: new Date().toISOString() }; // PLAN-TODOS
+    const row = { user_id: req.body.user_id, updated_at: new Date().toISOString() }; // PLAN-TODOS SNOWBALL
+    if (req.body.debt_method === 'avalanche' || req.body.debt_method === 'snowball') row.debt_method = req.body.debt_method;
     for (const k of ['min_buffer', 'birth_year', 'retire_age', 'monthly_invest', 'roth_ytd', 'k401_ytd', 'debt_extra']) {
       if (req.body[k] != null && req.body[k] !== '') {
         const v = Number(req.body[k]);
@@ -930,7 +931,13 @@ app.post('/expenses', async (req, res) => {
         });
       }
     } catch (e) {}
-    debts.sort((a, b) => (b.apr ?? -1) - (a.apr ?? -1));
+    let debtMethod = 'avalanche';
+    try {
+      const { data: us } = await supabase.from('user_settings').select('debt_method').eq('user_id', req.body.user_id).maybeSingle();
+      if (us && us.debt_method === 'snowball') debtMethod = 'snowball';
+    } catch (e) {}
+    if (debtMethod === 'snowball') debts.sort((a, b) => (Number(a.balance) || 0) - (Number(b.balance) || 0));
+    else debts.sort((a, b) => (b.apr ?? -1) - (a.apr ?? -1));
 
     console.log('[expenses]', bills.length, 'bills,', categories.length, 'categories, total out:', totalMonthly);
     const recurringSet = new Set(bills.map(b => b.name));
